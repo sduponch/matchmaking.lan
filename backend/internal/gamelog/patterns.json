@@ -1,0 +1,40 @@
+[
+  { "type": "cs2.game.commencing",   "pattern": "World triggered \"Game_Commencing\"" },
+  { "type": "cs2.game.over",         "pattern": "Game Over:" },
+
+  { "type": "cs2.round.start",       "pattern": "World triggered \"Round_Start\"" },
+  { "type": "cs2.round.end",         "pattern": "World triggered \"Round_End\"" },
+
+  { "type": "cs2.score",             "pattern": "Team {team:quoted} scored {score:quoted} with {players:quoted} players" },
+  { "type": "cs2.team.win",          "pattern": "Team {team:quoted} triggered {event:quoted}" },
+
+  { "type": "cs2.kill.headshot",     "pattern": "{killer:player} {kpos:pos} killed {victim:player} {vpos:pos} with {weapon:quoted} (headshot)" },
+  { "type": "cs2.kill",              "pattern": "{killer:player} {kpos:pos} killed {victim:player} {vpos:pos} with {weapon:quoted}" },
+  { "type": "cs2.kill.bomb",        "pattern": "{victim:player} {vpos:pos} was killed by the bomb." },
+  { "type": "cs2.kill.suicide",     "pattern": "{victim:player} {vpos:pos} committed suicide with {weapon:quoted}" },
+
+  { "type": "cs2.bomb.plant.begin",  "pattern": "{planter:player} triggered \"Bomb_Begin_Plant\" at bombsite {site:word}" },
+  { "type": "cs2.bomb.plant",        "pattern": "{planter:player} triggered \"Planted_The_Bomb\"" },
+  { "type": "cs2.bomb.defuse",       "pattern": "{defuser:player} triggered \"Defused_The_Bomb\"" },
+  { "type": "cs2.bomb.explode",      "pattern": "World triggered \"Bomb_Exploded\"" },
+
+  { "type": "cs2.chat.team",         "pattern": "{player:player} say_team {message:quoted}" },
+  { "type": "cs2.chat",              "pattern": "{player:player} say {message:quoted}" },
+
+  { "type": "cs2.player.enter",      "pattern": "{player:player} entered the game" },
+  { "type": "cs2.player.connect",    "pattern": "{player:player} connected, address {address:quoted}" },
+  { "type": "cs2.player.disconnect", "pattern": "{player:player} disconnected" },
+  { "type": "cs2.player.switch",     "pattern": "{player:player_nt} switched from team <{from:word}> to <{to:word}>" },
+
+  { "type": "cs2.bomb.got",          "pattern": "{player:player} triggered \"Got_The_Bomb\"" },
+  { "type": "cs2.bomb.drop",         "pattern": "{player:player} triggered \"Dropped_The_Bomb\"" },
+
+  { "type": "cs2.warmup.start",       "pattern": "World triggered \"Warmup_Start\"" },
+  { "type": "cs2.warmup.end",         "pattern": "World triggered \"Warmup_End\"" },
+  { "type": "cs2.match.start",       "pattern": "World triggered \"Match_Start\" on {map:quoted}" },
+
+  { "type": "cs2.freeze.start",      "pattern": "Starting Freeze period" },
+
+  { "type": "cs2.match.status",      "pattern": "MatchStatus: Score: {score_ct:int}:{score_t:int} on map {map:quoted} RoundsPlayed: {rounds:int}" },
+  { "type": "cs2.match.status.unset","pattern": "MatchStatus: Team {team:quoted} is unset." }
+]

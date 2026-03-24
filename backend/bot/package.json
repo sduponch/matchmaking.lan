@@ -1,0 +1,10 @@
+{
+  "name": "cs2-bot",
+  "version": "1.0.0",
+  "type": "commonjs",
+  "dependencies": {
+    "globaloffensive": "^3.3.0",
+    "steam-totp": "^2.1.2",
+    "steam-user": "^5.3.0"
+  }
+}

@@ -1,0 +1,4 @@
+backend/.env
+backend/servers.json
+backend/players.json
+backend/teams.json
