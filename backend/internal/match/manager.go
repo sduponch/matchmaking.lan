@@ -3,10 +3,14 @@ package match
 import (
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"matchmaking.lan/backend/internal/gamelog"
 )
+
+// GetLastLogAt is set at startup to retrieve last log reception time per server.
+var GetLastLogAt func(addr string) *time.Time
 
 var machines sync.Map // serverAddr → *Machine
 
@@ -25,6 +29,19 @@ func HandleGetState() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		addr := c.Param("addr")
 		state := Get(addr).State()
-		c.JSON(http.StatusOK, state)
+		if GetLastLogAt != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"phase":      state.Phase,
+				"map":        state.Map,
+				"round":      state.Round,
+				"score_ct":   state.ScoreCT,
+				"score_t":    state.ScoreT,
+				"players":    state.Players,
+				"started_at": state.StartedAt,
+				"last_log_at": GetLastLogAt(addr),
+			})
+		} else {
+			c.JSON(http.StatusOK, state)
+		}
 	}
 }

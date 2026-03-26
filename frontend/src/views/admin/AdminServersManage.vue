@@ -65,6 +65,9 @@ export default {
 				if (r) {
 					map[r.addr] = r.state
 					this.prefetchAvatars(r.state)
+					// Update last_log_at on the server object from the match poll
+					const srv = this.servers.find(s => s.addr === r.addr)
+					if (srv && r.state.last_log_at) srv.last_log_at = r.state.last_log_at
 				}
 			}
 			this.matchStates = map
@@ -136,6 +139,19 @@ export default {
 				this.changingMap[addr] = false
 			}
 		},
+		lastLogLabel(iso) {
+			const diff = (Date.now() - new Date(iso).getTime()) / 1000
+			if (diff < 60) return `il y a ${Math.floor(diff)}s`
+			if (diff < 3600) return `il y a ${Math.floor(diff / 60)}min`
+			if (diff < 86400) return `il y a ${Math.floor(diff / 3600)}h`
+			return `il y a ${Math.floor(diff / 86400)}j`
+		},
+		lastLogClass(iso) {
+			const diff = (Date.now() - new Date(iso).getTime()) / 1000
+			if (diff < 120) return 'text-success'
+			if (diff < 600) return 'text-warning'
+			return 'text-danger'
+		},
 		async removeServer(addr) {
 			await fetch(`${config.api.baseUrl}/servers/${encodeURIComponent(addr)}`, {
 				method: 'DELETE',
@@ -185,6 +201,7 @@ export default {
 							<th scope="col">Map</th>
 							<th scope="col">Joueurs</th>
 							<th scope="col">Ping</th>
+							<th scope="col">Dernier log</th>
 							<th scope="col"></th>
 						</tr>
 					</thead>
@@ -248,6 +265,13 @@ export default {
 									<span v-else class="text-inverse text-opacity-50">—</span>
 								</td>
 								<td class="text-inverse text-opacity-75">{{ srv.online ? srv.ping_ms + ' ms' : '—' }}</td>
+								<td>
+									<span v-if="srv.last_log_at" :title="new Date(srv.last_log_at).toLocaleString('fr-FR')"
+										:class="lastLogClass(srv.last_log_at)" class="small">
+										{{ lastLogLabel(srv.last_log_at) }}
+									</span>
+									<span v-else class="text-inverse text-opacity-25">—</span>
+								</td>
 								<td class="text-end pe-3" @click.stop>
 									<button class="btn btn-outline-danger btn-sm" @click="removeServer(srv.addr)" title="Retirer">
 										<i class="fa fa-trash"></i>
@@ -257,7 +281,7 @@ export default {
 
 							<!-- Ligne détail (accordéon) -->
 							<tr v-if="openServer === srv.addr">
-								<td colspan="9" class="p-0">
+								<td colspan="10" class="p-0">
 									<div class="px-4 py-3 border-top border-light border-opacity-10">
 										<div class="row g-4">
 

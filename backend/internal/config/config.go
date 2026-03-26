@@ -19,12 +19,8 @@ type Config struct {
 	JWTSecret string
 	JWTExpiry time.Duration
 
-	BotPort        string
-	GameServerAddr string
-	GameServers    []string
-
-	LogPort    string // UDP port for CS2 remote log listener
-	BackendAddr string // IP of this backend (sent to CS2 via logaddress_add_ss)
+	BotPort    string
+	BackendURL string // Public URL of this backend (e.g. http://api.tfury.com)
 
 	FaceitAPIKey string
 }
@@ -56,12 +52,9 @@ func Load() {
 		AdminSteamIDs: adminIDs,
 		JWTSecret:     mustGetEnv("JWT_SECRET"),
 		JWTExpiry:     expiry,
-		BotPort:        getEnv("BOT_PORT", "3001"),
-		GameServerAddr: getEnv("GAME_SERVER_ADDR", ""),
-		GameServers:    splitTrimmed(os.Getenv("GAME_SERVERS")),
-		LogPort:        getEnv("LOG_PORT", "27016"),
-		BackendAddr:    getEnv("BACKEND_ADDR", ""),
-		FaceitAPIKey:   getEnv("FACEIT_API_KEY", ""),
+		BotPort:      getEnv("BOT_PORT", "3001"),
+		BackendURL:   getEnv("BACKEND_URL", ""),
+		FaceitAPIKey: getEnv("FACEIT_API_KEY", ""),
 	}
 }
 

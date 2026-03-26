@@ -51,14 +51,40 @@ func save() error {
 func Upsert(steamid, username, avatar, role string) {
 	mu.Lock()
 	defer mu.Unlock()
+	team := ""
+	if existing, ok := players[steamid]; ok {
+		team = existing.Team
+	}
 	players[steamid] = &Player{
 		SteamID:  steamid,
 		Username: username,
 		Avatar:   avatar,
 		Role:     role,
+		Team:     team,
 		LastSeen: time.Now(),
 	}
 	_ = save()
+}
+
+// SyncRoles updates the role of all registered players based on the current admin list.
+// Should be called at startup after config is loaded.
+func SyncRoles(adminIDs map[string]bool) {
+	mu.Lock()
+	defer mu.Unlock()
+	changed := false
+	for id, p := range players {
+		newRole := "player"
+		if adminIDs[id] {
+			newRole = "admin"
+		}
+		if p.Role != newRole {
+			players[id].Role = newRole
+			changed = true
+		}
+	}
+	if changed {
+		_ = save()
+	}
 }
 
 // SetTeam updates the team field for a player.

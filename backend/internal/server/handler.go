@@ -1,7 +1,6 @@
 package server
 
 import (
-	"fmt"
 	"log"
 	"net/http"
 	"sync"
@@ -10,18 +9,20 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/rumblefrog/go-a2s"
 	"matchmaking.lan/backend/internal/config"
+	"matchmaking.lan/backend/internal/gamelog"
 )
 
 type ServerInfo struct {
-	Addr       string `json:"addr"`
-	Name       string `json:"name"`
-	Map        string `json:"map"`
-	Players    int    `json:"players"`
-	Bots       int    `json:"bots"`
-	MaxPlayers int    `json:"max_players"`
-	PingMs     int    `json:"ping_ms"`
-	Online     bool   `json:"online"`
-	Managed    bool   `json:"managed"`
+	Addr       string     `json:"addr"`
+	Name       string     `json:"name"`
+	Map        string     `json:"map"`
+	Players    int        `json:"players"`
+	Bots       int        `json:"bots"`
+	MaxPlayers int        `json:"max_players"`
+	PingMs     int        `json:"ping_ms"`
+	Online     bool       `json:"online"`
+	Managed    bool       `json:"managed"`
+	LastLogAt  *time.Time `json:"last_log_at,omitempty"`
 }
 
 func HandleList() gin.HandlerFunc {
@@ -61,6 +62,7 @@ func HandleList() gin.HandlerFunc {
 				defer wg.Done()
 				info := query(addr)
 				info.Managed = managedMap[addr] != ""
+				info.LastLogAt = GetLastLogAt(addr)
 				results[i] = info
 			}(i, addr)
 		}
@@ -93,16 +95,28 @@ func HandleAdd() gin.HandlerFunc {
 			return
 		}
 
-		// Register remote log listener on the CS2 server
-		if config.C.BackendAddr != "" {
-			logURL := fmt.Sprintf("http://%s:%s/internal/log", config.C.BackendAddr, config.C.Port)
+		// Register remote log listener and verify reception.
+		// ExpectLog must be registered before sending the RCON commands so we
+		// don't miss the log line CS2 emits immediately on logaddress_add_http.
+		if config.C.BackendURL != "" && body.RCON != "" {
+			token := getToken(body.Addr)
+			logURL := config.C.BackendURL + "/internal/log/" + token
+			cmd := `logaddress_add_http "` + logURL + `"`
+			done := make(chan bool, 1)
+			go func() { done <- gamelog.ExpectLog(body.Addr, 5*time.Second) }()
 			sendRCON(body.Addr, body.RCON, "log on")
-			sendRCON(body.Addr, body.RCON, `logaddress_add_http "`+logURL+`"`)
-			log.Printf("[gamelog] registered HTTP listener %s on %s", logURL, body.Addr)
+			if _, err := sendRCON(body.Addr, body.RCON, cmd); err != nil {
+				log.Printf("[gamelog] %s logaddress_add_http ERROR: %v", body.Addr, err)
+			} else if received := <-done; received {
+				log.Printf("[gamelog] %s log reception verified", body.Addr)
+			} else {
+				log.Printf("[gamelog] %s log reception timeout — check BACKEND_URL and firewall", body.Addr)
+			}
 		}
 
 		info := query(body.Addr)
 		info.Managed = true
+		info.LastLogAt = GetLastLogAt(body.Addr)
 		c.JSON(http.StatusOK, info)
 	}
 }

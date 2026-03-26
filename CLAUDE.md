@@ -43,6 +43,10 @@ npm install
 - `FACEIT_API_KEY`
 - `BOT_PORT`, `BOT_USERNAME`, `BOT_PASSWORD`, `BOT_SHARED_SECRET`
 
+`FRONTEND_URL` and `BACKEND_URL` must include scheme (`https://` or `http://`). Missing scheme causes broken redirect URLs in the Steam auth callback.
+
+`BACKEND_URL` is used to build the `logaddress_add_http` URL sent to CS2 servers via RCON. CS2 supports both `http://` and `https://`.
+
 ## Architecture
 
 ### Auth flow
@@ -51,6 +55,8 @@ Steam OpenID URL built client-side in `PageLogin.vue` → popup window → Go ca
 JWT claims: `steamid`, `username`, `avatar`, `role` (`admin` ou `player`).
 
 Admins définis via `ADMIN_STEAM_IDS` dans `.env`.
+
+On successful login, `registry.Upsert()` is called to register/update the player in `players.json`.
 
 ### API Endpoints
 
@@ -61,13 +67,48 @@ Admins définis via `ADMIN_STEAM_IDS` dans `.env`.
 | GET | `/profile/:steamid` | ✓ | Profil Steam + stats cachées (cs2_status / faceit_status) |
 | GET | `/profile/:steamid/cs2` | ✓ | Stats CS2 (polling, pending si fetch en cours) |
 | GET | `/profile/:steamid/faceit` | ✓ | Stats Faceit (polling, pending si fetch en cours) |
+| GET | `/players` | admin | Liste joueurs enregistrés (registry) |
+| GET | `/teams` | ✓ | Liste équipes |
+| POST | `/teams` | admin | Créer une équipe |
+| DELETE | `/teams/:id` | admin | Supprimer une équipe |
+| POST | `/teams/:id/players` | admin | Ajouter joueur à l'équipe |
+| DELETE | `/teams/:id/players/:steamid` | admin | Retirer joueur de l'équipe |
 | GET | `/servers` | ✓ | Liste serveurs LAN (découverte A2S + gérés) |
 | POST | `/servers` | admin | Ajouter serveur géré (teste RCON, configure logaddress_add_http) |
 | DELETE | `/servers/:addr` | admin | Retirer serveur géré |
 | POST | `/servers/:addr/map` | admin | Changer la map (RCON changelevel) |
-| GET | `/servers/:addr/match` | ✓ | État du match en cours |
+| GET | `/servers/:addr/match` | ✓ | État du match en cours + last_log_at |
 | GET | `/servers/:addr/logs` | ✓ | SSE stream des événements de log |
-| POST | `/internal/log` | — | Réception logs HTTP CS2 (logaddress_add_http) |
+| POST | `/internal/log/:token` | — | Réception logs CS2 (logaddress_add_http, token-based) |
+| POST | `/internal/log` | — | Réception logs CS2 (fallback sans token) |
+
+### Persistance
+
+| Fichier | Contenu |
+|---------|---------|
+| `servers.json` | `map[addr]{rcon, token}` — token 16 octets hex aléatoire par serveur |
+| `players.json` | `map[steamid]{username, avatar, role, team, last_seen}` |
+| `teams.json` | `map[id]{name, players[]}` |
+
+`last_log_at` est **en mémoire uniquement** — pas de persistance disque pour éviter les écritures à chaque log.
+
+**Migration `servers.json`** : si l'ancien format `map[string]string` est détecté, il est migré automatiquement vers le nouveau format avec génération de tokens.
+
+### Registre joueurs (`backend/internal/registry/`)
+
+- `store.go` : `Player{SteamID, Username, Avatar, Role, Team, LastSeen}`, persisté dans `players.json`
+- `Upsert(steamid, username, avatar, role)` — appelé à chaque connexion
+- `SetTeam(steamid, teamName)` — appelé par `teams` pour synchroniser le champ équipe
+- `List()` — trié par `last_seen` décroissant
+- `handler.go` : `GET /players` (admin uniquement)
+
+### Gestion équipes (`backend/internal/teams/`)
+
+- `store.go` : `Team{ID, Name, Players[], CreatedAt}`, persisté dans `teams.json`
+- `newID()` — génère un ID hex aléatoire
+- `AddPlayer()` / `RemovePlayer()` — appellent `registry.SetTeam()` pour synchronisation bidirectionnelle
+- `HandleDelete` — efface le champ équipe de tous les membres avant suppression
+- `handler.go` : 5 handlers (List, Create, Delete, AddPlayer, RemovePlayer)
 
 ### Stats cache (`backend/internal/player/`)
 
@@ -81,9 +122,30 @@ TTL : `ready` = 5 min, `pending_invite` = 2 min, `unavailable` = 30 s, `not_foun
 ### Serveurs LAN (`backend/internal/server/`)
 
 - **Découverte A2S** : broadcast UDP `255.255.255.255:27015`, réponse `go-a2s`, déduit joueurs humains = `Players - Bots`
-- **Store** : `servers.json` — `map[addr]rconPassword`, persisté sur disque
-- **Ajout** : teste RCON avant d'enregistrer, envoie `logaddress_add_http` pour activer les logs HTTP
+- **Store** : `servers.json` — `map[addr]{rcon, token}`, token 16 octets hex aléatoire par serveur
+- **Ajout** : teste RCON avant d'enregistrer → enregistre `ExpectLog` goroutine → envoie `log on` → envoie `logaddress_add_http "BACKEND_URL/internal/log/TOKEN"` → attend confirmation réception (timeout 5s)
+- **`last_log_at`** : en mémoire (`map[string]time.Time`), mis à jour à chaque POST reçu, exposé via `GetLastLogAt(addr)`
+- **`GetAddrByToken(token)`** : résout un token en adresse serveur — utilisé par `gamelog.ResolveToken`
 - **RCON** : `gorcon/rcon`, utilisé pour `changelevel <map>`
+
+### Identification serveur derrière NAT
+
+CS2 envoie les logs HTTP depuis l'IP de la passerelle, pas l'IP individuelle des serveurs. Solution : chaque serveur a un token unique (16 octets hex) embarqué dans le path de l'URL `logaddress_add_http`. Le token est résolu en adresse serveur à chaque POST reçu.
+
+```
+logaddress_add_http "https://api.example.com/internal/log/<token>"
+```
+
+### Hook pattern (évite les imports circulaires)
+
+Les packages `gamelog`, `server` et `match` ne peuvent pas s'importer mutuellement. Les dépendances sont câblées dans `main.go` via des variables de fonction :
+
+```go
+gamelog.OnEvent      = match.Apply           // dispatch événements → machine d'état
+gamelog.ResolveToken = server.GetAddrByToken // résolution token → addr
+gamelog.OnLog        = server.UpdateLastLog  // mise à jour last_log_at
+match.GetLastLogAt   = server.GetLastLogAt   // inclus dans GET /servers/:addr/match
+```
 
 ### Bot CS2 (`backend/bot/index.js`)
 
@@ -113,6 +175,13 @@ Réception des logs CS2 via HTTP POST (`logaddress_add_http`).
 
 **SSE broker :** `gamelog.Broker` diffuse les événements par serveur. `gamelog.OnEvent` hook pour brancher la machine d'état.
 
+**Hooks exportés :**
+- `OnEvent func(*Event)` — déclenché pour chaque événement parsé
+- `OnLog func(addr string)` — déclenché à chaque POST reçu (avant parsing), pour `last_log_at`
+- `ResolveToken func(token string) (addr string, ok bool)` — résout token → addr serveur
+
+**`ExpectLog(addr, timeout)`** — attend un log entrant pour un serveur donné, utilisé pour vérifier la réception après `logaddress_add_http`.
+
 ### Machine d'état (`backend/internal/match/`)
 
 Par serveur, suit : `phase`, `map`, `round`, `score_ct`, `score_t`, `players`.
@@ -123,13 +192,24 @@ Par serveur, suit : `phase`, `map`, `round`, `score_ct`, `score_t`, `players`.
 
 Stats enrichies à chaque `cs2.round.stats` (JSON block) — `findByAccountID` convertit l'accountid 32-bit en Steam64 pour la lookup directe.
 
+`GET /servers/:addr/match` retourne l'état + `last_log_at` (via hook `GetLastLogAt`). Le frontend poll cet endpoint toutes les 5s pour mettre à jour `last_log_at` sans attendre `fetchServers()`.
+
+**Hook exporté :**
+- `GetLastLogAt func(addr string) *time.Time` — câblé vers `server.GetLastLogAt`
+
 ### Frontend (`frontend/src/`)
 
 **Stores Pinia :**
 - `auth.ts` — token JWT, user (steamid, username, avatar, role), `init()` / `setToken()` / `logout()`
 - `app-option.ts` — état UI layout (sidebar, header, thème…)
 
-**Vues :**
+**Vues admin :**
+- `AdminPlayers.vue` — tableau joueurs avec avatar/rôle/équipe/stats CS2+Faceit/dernière connexion, poll `retrieving`
+- `AdminMatchmakingTeams.vue` — accordion : liste équipes avec moyennes CS2/Faceit, composition, ajout/retrait joueurs, création équipe (modal)
+- `AdminServersManage.vue` — tableau serveurs avec colonne "Dernier log" (vert <2min, orange 2-10min, rouge >10min)
+- `AdminServerSetup.vue` — ajout serveur avec vérification réception logs
+
+**Vues joueur :**
 - `PageLogin.vue` — bouton login Steam (popup OpenID)
 - `PageAuthDone.vue` — récepteur postMessage après auth
 - `Profile.vue` — profil joueur, poll `/cs2` et `/faceit` séparément tant que `retrieving`
@@ -144,3 +224,10 @@ Stats enrichies à chaque `cs2.round.stats` (JSON block) — `findByAccountID` c
 
 ### Styling
 Bootstrap 5, SCSS dans `src/scss/`. Dark mode par défaut (`data-bs-theme="dark"`).
+
+## Notes techniques importantes
+
+- **`go build ./...`** est la seule façon fiable de vérifier le code Go — gopls affiche de faux positifs car `go.work` a été supprimé (gin v1.12.0 requiert go 1.25.0, système a go 1.24.4).
+- **`go.work` supprimé** — ne pas recréer, gopls ne fonctionne pas correctement dans ce contexte.
+- **`logaddress_add_http`** — n'accepte qu'un seul paramètre URI. Le token doit être dans le path, pas en second argument. CS2 supporte `http://` et `https://`.
+- **Imports circulaires** — `gamelog`, `server`, `match` ne peuvent pas s'importer entre eux. Utiliser le pattern hook via `main.go`.

@@ -60,6 +60,31 @@ func (b *broker) publish(e *Event) {
 // Set this at startup to hook the match state machine.
 var OnEvent func(*Event)
 
+// OnLog is called on every log POST reception with the resolved server address.
+// Set this at startup to track last log time per server.
+var OnLog func(addr string)
+
+// ResolveToken maps a log token to a server address.
+// Set this at startup to enable token-based server identification.
+var ResolveToken func(token string) (addr string, ok bool)
+
+// pending holds one-shot channels waiting for the first log from a server.
+var pending sync.Map // addr → chan struct{}
+
+// ExpectLog waits up to timeout for any log POST to arrive from addr.
+// Returns true if a log was received before the timeout.
+func ExpectLog(addr string, timeout time.Duration) bool {
+	ch := make(chan struct{}, 1)
+	pending.Store(addr, ch)
+	defer pending.Delete(addr)
+	select {
+	case <-ch:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
 // HTTPHandler receives log lines POSTed by CS2 via logaddress_add_http.
 // The CS2 server is identified by its remote IP.
 func HTTPHandler(w http.ResponseWriter, r *http.Request) {
@@ -68,12 +93,40 @@ func HTTPHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Identify the CS2 server by source IP
-	ip := r.RemoteAddr
-	if idx := strings.LastIndex(ip, ":"); idx != -1 {
-		ip = ip[:idx]
+	// Identify the CS2 server:
+	// 1. Resolve the token from the URL path /internal/log/{token}
+	// 2. Fall back to source IP for direct connections
+	var serverAddr string
+	if ResolveToken != nil {
+		// Token is the last path segment
+		path := r.URL.Path
+		if idx := strings.LastIndex(path, "/"); idx != -1 {
+			token := path[idx+1:]
+			if token != "log" {
+				if addr, ok := ResolveToken(token); ok {
+					serverAddr = addr
+				}
+			}
+		}
 	}
-	serverAddr := ip + ":27015"
+	if serverAddr == "" {
+		ip := r.RemoteAddr
+		if idx := strings.LastIndex(ip, ":"); idx != -1 {
+			ip = ip[:idx]
+		}
+		serverAddr = ip + ":27015"
+	}
+
+	// Notify hooks on first byte received from this server.
+	if OnLog != nil {
+		OnLog(serverAddr)
+	}
+	if ch, ok := pending.Load(serverAddr); ok {
+		select {
+		case ch.(chan struct{}) <- struct{}{}:
+		default:
+		}
+	}
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {

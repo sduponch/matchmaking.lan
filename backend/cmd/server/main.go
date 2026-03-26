@@ -21,6 +21,7 @@ import (
 
 func main() {
 	config.Load()
+	registry.SyncRoles(config.C.AdminSteamIDs)
 
 	gin.DebugPrintRouteFunc = func(httpMethod, absolutePath, handlerName string, nuHandlers int) {
 		log.Printf("[GIN-debug] %-6s %-30s --> %s (%d handlers)", httpMethod, absolutePath, handlerName, nuHandlers)
@@ -30,6 +31,9 @@ func main() {
 	botManager := bot.NewManager(config.C.BotPort)
 	botManager.Start(ctx)
 	gamelog.OnEvent = match.Apply
+	gamelog.ResolveToken = server.GetAddrByToken
+	gamelog.OnLog = server.UpdateLastLog
+	match.GetLastLogAt = server.GetLastLogAt
 
 
 	r := gin.New()
@@ -51,6 +55,7 @@ func main() {
 	r.GET("/servers", requireAuth(), server.HandleList())
 	r.POST("/servers", requireAuth(), requireAdmin(), server.HandleAdd())
 	r.POST("/servers/:addr/map", requireAuth(), requireAdmin(), server.HandleChangeMap())
+	r.POST("/internal/log/:token", func(c *gin.Context) { gamelog.HTTPHandler(c.Writer, c.Request) })
 	r.POST("/internal/log", func(c *gin.Context) { gamelog.HTTPHandler(c.Writer, c.Request) })
 	r.GET("/servers/:addr/match", requireAuth(), match.HandleGetState())
 	r.GET("/servers/:addr/logs", requireAuth(), gamelog.HandleSSE())
