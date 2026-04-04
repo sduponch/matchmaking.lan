@@ -189,7 +189,11 @@ func HTTPHandler(w http.ResponseWriter, r *http.Request) {
 
 		e := parse(serverAddr, line)
 		if e == nil {
-			log.Printf("[gamelog] unmatched: %q", content)
+			// Silently skip RCON echo lines ("rcon from ...") — CS2 logs every received
+			// RCON command; they're noise and never match a gamelog pattern.
+			if !strings.HasPrefix(content, "rcon from ") {
+				log.Printf("[gamelog] unmatched: %q", content)
+			}
 			continue
 		}
 		switch e.Type {

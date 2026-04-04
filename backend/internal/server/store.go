@@ -7,18 +7,23 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"matchmaking.lan/backend/internal/config"
 )
 
 const storeFile = "servers.json"
 
 type serverEntry struct {
-	RCON  string `json:"rcon"`
-	Token string `json:"token"`
+	Addr  string   `json:"addr"`
+	Name  string   `json:"name"`
+	RCON  string   `json:"rcon"`
+	Token string   `json:"token"`
+	Maps  []string `json:"maps,omitempty"`
 }
 
 var (
 	mu        sync.RWMutex
-	managed   map[string]*serverEntry // addr → entry
+	managed   map[string]*serverEntry // token → entry
 	lastLogMu sync.RWMutex
 	lastLogs  = map[string]time.Time{} // addr → last log received (in-memory only)
 )
@@ -33,15 +38,52 @@ func load() {
 	if err != nil {
 		return
 	}
-	// Try new format first
-	if err := json.Unmarshal(data, &managed); err == nil {
-		return
+
+	// Try current format: map[token]*serverEntry (addr inside entry)
+	var byToken map[string]*serverEntry
+	if err := json.Unmarshal(data, &byToken); err == nil {
+		// Validate: entries must have an Addr field (distinguishes from old formats)
+		valid := true
+		for _, e := range byToken {
+			if e.Addr == "" {
+				valid = false
+				break
+			}
+		}
+		if valid && len(byToken) > 0 {
+			managed = byToken
+			return
+		}
 	}
-	// Migrate from old format (map[string]string addr→rcon)
-	var old map[string]string
-	if err := json.Unmarshal(data, &old); err == nil {
-		for addr, rcon := range old {
-			managed[addr] = &serverEntry{RCON: rcon, Token: newToken()}
+
+	// Migrate from v2 format: map[addr]{rcon, token}
+	var v2 map[string]*struct {
+		RCON  string `json:"rcon"`
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(data, &v2); err == nil {
+		allHaveToken := true
+		for _, e := range v2 {
+			if e.Token == "" {
+				allHaveToken = false
+				break
+			}
+		}
+		if allHaveToken && len(v2) > 0 {
+			for addr, e := range v2 {
+				managed[e.Token] = &serverEntry{Addr: addr, RCON: e.RCON, Token: e.Token}
+			}
+			_ = save()
+			return
+		}
+	}
+
+	// Migrate from v1 format: map[addr]string (rcon only)
+	var v1 map[string]string
+	if err := json.Unmarshal(data, &v1); err == nil {
+		for addr, rcon := range v1 {
+			tok := newToken()
+			managed[tok] = &serverEntry{Addr: addr, RCON: rcon, Token: tok}
 		}
 		_ = save()
 	}
@@ -61,25 +103,71 @@ func newToken() string {
 	return hex.EncodeToString(b)
 }
 
-// getManagedAddrs returns addr→rcon for all managed servers.
-func getManagedAddrs() map[string]string {
+// GetAll returns a snapshot of all managed servers (token → entry).
+func GetAll() map[string]*serverEntry {
 	mu.RLock()
 	defer mu.RUnlock()
-	cp := make(map[string]string, len(managed))
-	for addr, e := range managed {
-		cp[addr] = e.RCON
+	cp := make(map[string]*serverEntry, len(managed))
+	for tok, e := range managed {
+		cp[tok] = e
 	}
 	return cp
 }
 
-// getToken returns the log token for a given server address.
-func getToken(addr string) string {
+// GetByToken returns the server entry for a given token.
+func GetByToken(token string) (*serverEntry, bool) {
 	mu.RLock()
 	defer mu.RUnlock()
-	if e, ok := managed[addr]; ok {
-		return e.Token
+	e, ok := managed[token]
+	return e, ok
+}
+
+// GetAddrRCON returns the address and RCON password for a server by token.
+// ok is false if the token is unknown or has no RCON configured.
+func GetAddrRCON(token string) (addr, rcon string, ok bool) {
+	mu.RLock()
+	defer mu.RUnlock()
+	e, exists := managed[token]
+	if !exists {
+		return "", "", false
 	}
-	return ""
+	return e.Addr, e.RCON, e.RCON != ""
+}
+
+// GetTokenByAddr resolves a server address back to its token.
+func GetTokenByAddr(addr string) (string, bool) {
+	mu.RLock()
+	defer mu.RUnlock()
+	for tok, e := range managed {
+		if e.Addr == addr {
+			return tok, true
+		}
+	}
+	return "", false
+}
+
+// GetLogSetupCmds returns the RCON commands to (re-)register the log endpoint for a server.
+// Should be sent before changelevel and again on warmup.start to survive map reloads.
+func GetLogSetupCmds(token string) []string {
+	if config.C.BackendURL == "" {
+		return nil
+	}
+	logURL := config.C.BackendURL + "/internal/log/" + token
+	return []string{
+		"log on",
+		"logaddress_delall_http",
+		`logaddress_add_http "` + logURL + `"`,
+	}
+}
+
+// GetAddrByToken resolves a log token back to a server address.
+func GetAddrByToken(token string) (string, bool) {
+	mu.RLock()
+	defer mu.RUnlock()
+	if e, ok := managed[token]; ok {
+		return e.Addr, true
+	}
+	return "", false
 }
 
 // UpdateLastLog records the current time as the last log reception for addr (in memory only).
@@ -100,32 +188,48 @@ func GetLastLogAt(addr string) *time.Time {
 	return &t
 }
 
-// GetAddrByToken resolves a log token back to a server address.
-func GetAddrByToken(token string) (string, bool) {
-	mu.RLock()
-	defer mu.RUnlock()
-	for addr, e := range managed {
-		if e.Token == token {
-			return addr, true
-		}
-	}
-	return "", false
-}
-
-func upsertManaged(addr, rcon string) error {
+// upsertManaged adds or updates a server entry keyed by token.
+func upsertManaged(addr, rcon string) (string, error) {
 	mu.Lock()
 	defer mu.Unlock()
-	if e, ok := managed[addr]; ok {
-		e.RCON = rcon
-	} else {
-		managed[addr] = &serverEntry{RCON: rcon, Token: newToken()}
+	// Check if addr already exists → reuse its token
+	for tok, e := range managed {
+		if e.Addr == addr {
+			e.RCON = rcon
+			return tok, save()
+		}
 	}
+	tok := newToken()
+	managed[tok] = &serverEntry{Addr: addr, RCON: rcon, Token: tok}
+	return tok, save()
+}
+
+// removeManaged removes a server by token.
+func removeManaged(token string) error {
+	mu.Lock()
+	defer mu.Unlock()
+	delete(managed, token)
 	return save()
 }
 
-func removeManaged(addr string) error {
+// setMaps stores the available map list for a server.
+func setMaps(token string, maps []string) {
 	mu.Lock()
 	defer mu.Unlock()
-	delete(managed, addr)
+	if e, ok := managed[token]; ok {
+		e.Maps = maps
+		_ = save()
+	}
+}
+
+// setName updates the display name of a server.
+func setName(token, name string) error {
+	mu.Lock()
+	defer mu.Unlock()
+	e, ok := managed[token]
+	if !ok {
+		return os.ErrNotExist
+	}
+	e.Name = name
 	return save()
 }

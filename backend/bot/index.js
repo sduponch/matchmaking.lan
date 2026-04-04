@@ -37,7 +37,7 @@ client.logOn(logOnOptions);
 
 client.on('loggedOn', () => {
   log('[bot] Logged into Steam');
-  client.setPersona(SteamUser.EPersonaState.Online);
+  client.setPersona(SteamUser.EPersonaState.Invisible);
   client.gamesPlayed([730]);
 });
 

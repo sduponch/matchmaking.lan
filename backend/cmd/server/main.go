@@ -11,8 +11,11 @@ import (
 	"matchmaking.lan/backend/internal/auth"
 	"matchmaking.lan/backend/internal/bot"
 	"matchmaking.lan/backend/internal/config"
+	"matchmaking.lan/backend/internal/encounter"
 	"matchmaking.lan/backend/internal/gamelog"
 	"matchmaking.lan/backend/internal/match"
+	"matchmaking.lan/backend/internal/mappoolconfig"
+	"matchmaking.lan/backend/internal/matchconfig"
 	"matchmaking.lan/backend/internal/player"
 	"matchmaking.lan/backend/internal/registry"
 	"matchmaking.lan/backend/internal/server"
@@ -34,6 +37,217 @@ func main() {
 	gamelog.ResolveToken = server.GetAddrByToken
 	gamelog.OnLog = server.UpdateLastLog
 	match.GetLastLogAt = server.GetLastLogAt
+	encounter.OnStart = func(serverToken string) {
+		if addr, ok := server.GetAddrByToken(serverToken); ok {
+			match.ExpectWarmup(addr)
+		}
+	}
+	match.OnGameOver = func(addr string, scoreCT, scoreT int) {
+		if token, ok := server.GetTokenByAddr(addr); ok {
+			encounter.RecordResult(token, scoreCT, scoreT)
+		}
+	}
+	match.GetEncounterInfo = func(addr string) (sidePick string, readyCount int, maxRounds int, ok bool) {
+		token, tok := server.GetTokenByAddr(addr)
+		if !tok {
+			return
+		}
+		enc, eok := encounter.GetByServerID(token)
+		if !eok {
+			return
+		}
+		mr := enc.MaxRounds
+		if mr == 0 {
+			mr = 24
+		}
+		return enc.SidePick, enc.ReadyCount, mr, true
+	}
+
+	// getTeamNames returns the display names for Team1 and Team2.
+	getTeamNames := func(enc *encounter.Encounter) (string, string) {
+		name1, name2 := "Team1", "Team2"
+		if t, ok := teams.Get(enc.Team1); ok && t.Name != "" {
+			name1 = t.Name
+		}
+		if t, ok := teams.Get(enc.Team2); ok && t.Name != "" {
+			name2 = t.Name
+		}
+		return name1, name2
+	}
+
+	// teamNameCmds returns mp_teamname_1/2 commands (no side awareness, for warmup/knife).
+	// mp_teamname_1 = CT slot, mp_teamname_2 = T slot.
+	teamNameCmds := func(enc *encounter.Encounter) []string {
+		name1, name2 := getTeamNames(enc)
+		return []string{
+			`mp_teamname_1 "` + name1 + `"`,
+			`mp_teamname_2 "` + name2 + `"`,
+		}
+	}
+
+	// teamNameCmdsWithSide returns mp_teamname commands with correct CT/T assignment.
+	// ctIsTeam1=true → Team1 is on CT side; false → Team2 is on CT side.
+	teamNameCmdsWithSide := func(enc *encounter.Encounter, ctIsTeam1 bool) []string {
+		name1, name2 := getTeamNames(enc)
+		if ctIsTeam1 {
+			return []string{`mp_teamname_1 "` + name1 + `"`, `mp_teamname_2 "` + name2 + `"`}
+		}
+		return []string{`mp_teamname_1 "` + name2 + `"`, `mp_teamname_2 "` + name1 + `"`}
+	}
+
+	// buildHostname builds the hostname for any phase.
+	// For phases with known sides (live, halftime, second_half, overtime), adds (CT)/(T) labels.
+	// For other phases (warmup, knife, game_over), shows "Team1 vs Team2 - Label".
+	buildHostname := func(enc *encounter.Encounter, ctIsTeam1 bool, phase string) string {
+		name1, name2 := getTeamNames(enc)
+		// Modes without halves show "Live" instead of "1ère Mi-temps".
+		firstHalfLabel := "1ère Mi-temps"
+		switch enc.GameMode {
+		case "deathmatch", "armsrace", "casual":
+			firstHalfLabel = "Live"
+		}
+		sideLabels := map[string]string{
+			"warmup":      "Warmup",
+			"first_half":  firstHalfLabel,
+			"second_half": "2ème Mi-temps",
+			"halftime":    "Mi-temps",
+			"overtime":    "Prolongation",
+		}
+		phaseLabels := map[string]string{
+			"knife":     "Couteaux",
+			"game_over": "Terminé",
+		}
+		if label, ok := sideLabels[phase]; ok {
+			var ctName, tName string
+			if ctIsTeam1 {
+				ctName, tName = name1, name2
+			} else {
+				ctName, tName = name2, name1
+			}
+			return ctName + " (CT) vs " + tName + " (T) - " + label
+		}
+		h := name1 + " vs " + name2
+		if label, ok := phaseLabels[phase]; ok {
+			h += " - " + label
+		}
+		return h
+	}
+
+	match.OnFirstPlayerJoin = func(addr, steamID, team string) {
+		token, ok := server.GetTokenByAddr(addr)
+		if !ok {
+			return
+		}
+		enc, ok := encounter.GetByServerID(token)
+		if !ok {
+			return
+		}
+		if enc.SidePick != "ct" && enc.SidePick != "t" {
+			return
+		}
+		srvAddr, rcon, ok := server.GetAddrRCON(token)
+		if !ok {
+			return
+		}
+		expectedCT := enc.SidePick == "ct"
+		actualCT := team == "CT"
+		if expectedCT != actualCT {
+			log.Printf("[match] %s first player on wrong side (%s), swapping", addr, team)
+			_ = server.SendRCONBatch(srvAddr, rcon, []string{"mp_swapteams"})
+			// mp_swapteams triggers Restart_Round_(1_second) — push teamnames after the restart.
+			nameCmds := teamNameCmdsWithSide(enc, expectedCT)
+			go func() {
+				time.Sleep(2 * time.Second)
+				_ = server.SendRCONBatch(srvAddr, rcon, nameCmds)
+			}()
+		}
+	}
+
+	match.OnKnifeChoice = func(addr, winnerSide, chosenSide string) {
+		token, ok := server.GetTokenByAddr(addr)
+		if !ok {
+			return
+		}
+		enc, ok := encounter.GetByServerID(token)
+		if !ok {
+			return
+		}
+		srvAddr, rcon, ok := server.GetAddrRCON(token)
+		if !ok {
+			return
+		}
+		var cmds []string
+		// Swap teams if the knife winner wants to switch from their current side.
+		needSwap := (winnerSide == "CT" && chosenSide == "t") ||
+			(winnerSide == "TERRORIST" && chosenSide == "ct")
+		if needSwap {
+			cmds = append(cmds, "mp_swapteams")
+		}
+		// After potential swap: Team1 is CT if no swap happened (knife started Team1=CT).
+		ctIsTeam1 := !needSwap
+		cmds = append(cmds, matchconfig.GetProfilePhaseCommands(enc.ProfileID, "live")...)
+		cmds = append(cmds, teamNameCmdsWithSide(enc, ctIsTeam1)...)
+		cmds = append(cmds, `hostname "`+buildHostname(enc, ctIsTeam1, "first_half")+`"`)
+		_ = server.SendRCONBatch(srvAddr, rcon, cmds)
+	}
+
+	match.OnPhaseChange = func(addr, phase string) {
+		token, ok := server.GetTokenByAddr(addr)
+		if !ok {
+			return
+		}
+		enc, ok := encounter.GetByServerID(token)
+		if !ok {
+			return
+		}
+		srvAddr, rcon, ok := server.GetAddrRCON(token)
+		if !ok {
+			return
+		}
+		var cmds []string
+		switch phase {
+		case "warmup":
+			ctIsTeam1 := enc.SidePick != "t"
+			cmds = append(cmds, matchconfig.GetProfileWarmupCommands(enc.ProfileID)...)
+			cmds = append(cmds, server.GetLogSetupCmds(token)...)
+			cmds = append(cmds, teamNameCmdsWithSide(enc, ctIsTeam1)...)
+			cmds = append(cmds, `hostname "`+buildHostname(enc, ctIsTeam1, "warmup")+`"`)
+		case "warmup_end":
+			cmds = []string{`tv_record "enc_` + enc.ID + `"`}
+		case "knife":
+			cmds = append(cmds, matchconfig.GetProfilePhaseCommands(enc.ProfileID, "knife")...)
+			cmds = append(cmds, teamNameCmds(enc)...)
+			cmds = append(cmds, `hostname "`+buildHostname(enc, true, "knife")+`"`)
+		case "first_half":
+			// "first_half" via OnPhaseChange = non-knife path (SidePick "ct" or "t").
+			ctIsTeam1 := enc.SidePick != "t"
+			cmds = append(cmds, matchconfig.GetProfilePhaseCommands(enc.ProfileID, "live")...)
+			cmds = append(cmds, teamNameCmdsWithSide(enc, ctIsTeam1)...)
+			cmds = append(cmds, `hostname "`+buildHostname(enc, ctIsTeam1, "first_half")+`"`)
+		case "second_half":
+			// Second half: sides swap vs first half.
+			ctIsTeam1 := enc.SidePick == "t"
+			cmds = append(cmds, teamNameCmdsWithSide(enc, ctIsTeam1)...)
+			cmds = append(cmds, `hostname "`+buildHostname(enc, ctIsTeam1, "second_half")+`"`)
+		case "halftime":
+			// Same sides as first half.
+			ctIsTeam1 := enc.SidePick != "t"
+			cmds = append(cmds, matchconfig.GetProfilePhaseCommands(enc.ProfileID, "halftime")...)
+			cmds = append(cmds, teamNameCmdsWithSide(enc, ctIsTeam1)...)
+			cmds = append(cmds, `hostname "`+buildHostname(enc, ctIsTeam1, "halftime")+`"`)
+		case "game_over":
+			cmds = append(cmds, matchconfig.GetProfilePhaseCommands(enc.ProfileID, "game_over")...)
+			cmds = append(cmds, `hostname "`+buildHostname(enc, true, "game_over")+`"`)
+			cmds = append(cmds, "tv_stoprecord")
+		case "overtime":
+			// Overtime: use first-half side assignment.
+			ctIsTeam1 := enc.SidePick != "t"
+			cmds = append(cmds, matchconfig.GetProfilePhaseCommands(enc.ProfileID, "overtime")...)
+			cmds = append(cmds, teamNameCmdsWithSide(enc, ctIsTeam1)...)
+			cmds = append(cmds, `hostname "`+buildHostname(enc, ctIsTeam1, "overtime")+`"`)
+		}
+		_ = server.SendRCONBatch(srvAddr, rcon, cmds)
+	}
 
 
 	r := gin.New()
@@ -54,12 +268,16 @@ func main() {
 
 	r.GET("/servers", requireAuth(), server.HandleList())
 	r.POST("/servers", requireAuth(), requireAdmin(), server.HandleAdd())
-	r.POST("/servers/:addr/map", requireAuth(), requireAdmin(), server.HandleChangeMap())
 	r.POST("/internal/log/:token", func(c *gin.Context) { gamelog.HTTPHandler(c.Writer, c.Request) })
 	r.POST("/internal/log", func(c *gin.Context) { gamelog.HTTPHandler(c.Writer, c.Request) })
-	r.GET("/servers/:addr/match", requireAuth(), match.HandleGetState())
-	r.GET("/servers/:addr/logs", requireAuth(), gamelog.HandleSSE())
-	r.DELETE("/servers/:addr", requireAuth(), requireAdmin(), server.HandleRemove())
+
+	srv := r.Group("/servers/:token", resolveServerToken())
+	srv.POST("/map", requireAuth(), requireAdmin(), server.HandleChangeMap())
+	srv.POST("/cfg", requireAuth(), requireAdmin(), server.HandlePushCFG())
+	srv.GET("/match", requireAuth(), match.HandleGetState())
+	srv.GET("/logs", requireAuth(), gamelog.HandleSSE())
+	srv.DELETE("", requireAuth(), requireAdmin(), server.HandleRemove())
+	srv.PUT("/name", requireAuth(), requireAdmin(), server.HandleSetName())
 
 	r.GET("/players", requireAuth(), requireAdmin(), registry.HandleList())
 
@@ -68,6 +286,30 @@ func main() {
 	r.DELETE("/teams/:id", requireAuth(), requireAdmin(), teams.HandleDelete())
 	r.POST("/teams/:id/players", requireAuth(), requireAdmin(), teams.HandleAddPlayer())
 	r.DELETE("/teams/:id/players/:steamid", requireAuth(), requireAdmin(), teams.HandleRemovePlayer())
+
+	r.GET("/match-profiles", requireAuth(), matchconfig.HandleList())
+	r.POST("/match-profiles", requireAuth(), requireAdmin(), matchconfig.HandleCreate())
+	r.GET("/match-profiles/:id", requireAuth(), matchconfig.HandleGet())
+	r.PUT("/match-profiles/:id", requireAuth(), requireAdmin(), matchconfig.HandleUpdate())
+	r.DELETE("/match-profiles/:id", requireAuth(), requireAdmin(), matchconfig.HandleDelete())
+	r.GET("/match-profiles/:id/cfg/:phase", requireAuth(), matchconfig.HandleGetCFG())
+	r.PUT("/match-profiles/:id/cfg/:phase", requireAuth(), requireAdmin(), matchconfig.HandleSetCFG())
+	r.GET("/server-init-cfg", requireAuth(), matchconfig.HandleGetServerInitCFG())
+	r.PUT("/server-init-cfg", requireAuth(), requireAdmin(), matchconfig.HandleSetServerInitCFG())
+
+	r.GET("/map-pool", requireAuth(), mappoolconfig.HandleGet())
+	r.PUT("/map-pool", requireAuth(), requireAdmin(), mappoolconfig.HandleSet())
+
+	r.GET("/encounters", requireAuth(), encounter.HandleList())
+	r.POST("/encounters", requireAuth(), requireAdmin(), encounter.HandleCreate())
+	r.GET("/encounters/:id", requireAuth(), encounter.HandleGet())
+	r.PUT("/encounters/:id", requireAuth(), requireAdmin(), encounter.HandleUpdate())
+	r.DELETE("/encounters/:id", requireAuth(), requireAdmin(), encounter.HandleDelete())
+	r.POST("/encounters/:id/start", requireAuth(), requireAdmin(), encounter.HandleStart())
+	r.PUT("/encounters/:id/maps", requireAuth(), requireAdmin(), encounter.HandleSetMaps())
+	r.POST("/encounters/:id/result", requireAuth(), requireAdmin(), encounter.HandleSetResult())
+	r.POST("/encounters/:id/reopen", requireAuth(), requireAdmin(), encounter.HandleReopen())
+	r.GET("/encounters/:id/maps", requireAuth(), encounter.HandleListMaps())
 
 	r.GET("/profile/:steamid", requireAuth(), player.HandleGetProfile(botManager))
 	r.GET("/profile/:steamid/cs2", requireAuth(), player.HandleGetCS2(botManager))
@@ -91,7 +333,7 @@ func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", config.C.FrontendURL)
 		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type")
-		c.Header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
 			return
@@ -107,6 +349,19 @@ func requireAdmin() gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "admin required"})
 			return
 		}
+		c.Next()
+	}
+}
+
+func resolveServerToken() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		token := c.Param("token")
+		addr, ok := server.GetAddrByToken(token)
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "server not found"})
+			return
+		}
+		c.Set("serverAddr", addr)
 		c.Next()
 	}
 }

@@ -19,6 +19,31 @@ export const useAppSidebarMenuStore = defineStore("appSidebarMenu", () => {
 			'icon': 'fa fa-display',
 			'text': 'Counter-Strike 2',
 			'accessGroup': ['admin'],
+		},{
+			'url': '/admin/matchmaking/match-configs',
+			'icon': 'fa fa-file-code',
+			'text': 'Profils de match',
+			'accessGroup': ['admin'],
+		}],
+	},{
+		'icon': 'fa fa-gamepad',
+		'text': 'Counter-Strike 2',
+		'accessGroup': ['admin'],
+		'children': [{
+			'url': '/admin/cs2',
+			'icon': 'fa fa-map',
+			'text': 'Map pool officiel',
+			'accessGroup': ['admin'],
+		},{
+			'url': '/admin/matchmaking/encounters',
+			'icon': 'fa fa-shield-halved',
+			'text': 'Rencontres',
+			'accessGroup': ['admin'],
+		},{
+			'url': '/admin/matchmaking/tournaments',
+			'icon': 'fa fa-trophy',
+			'text': 'Tournois',
+			'accessGroup': ['admin'],
 		}],
 	},{
 		'icon': 'fa fa-shuffle',
@@ -33,11 +58,6 @@ export const useAppSidebarMenuStore = defineStore("appSidebarMenu", () => {
 			'url': '/admin/matchmaking/teams',
 			'icon': 'fa-solid fa-people-group',
 			'text': 'Equipes',
-			'accessGroup': ['admin'],
-		},{
-			'url': '/admin/matchmaking/tournaments',
-			'icon': 'fa fa-trophy',
-			'text': 'Tournois',
 			'accessGroup': ['admin'],
 		}],
 	},{

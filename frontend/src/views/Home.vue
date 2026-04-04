@@ -57,16 +57,16 @@ export default {
 			const managed = (this.servers || []).filter(s => s.managed && s.online)
 			const results = await Promise.all(
 				managed.map(s =>
-					fetch(`${config.api.baseUrl}/servers/${encodeURIComponent(s.addr)}/match`, { headers: this.authHeaders() })
+					fetch(`${config.api.baseUrl}/servers/${s.id}/match`, { headers: this.authHeaders() })
 						.then(r => r.json())
-						.then(state => ({ addr: s.addr, state }))
+						.then(state => ({ id: s.id, state }))
 						.catch(() => null)
 				)
 			)
 			const map = {}
 			for (const r of results) {
 				if (r) {
-					map[r.addr] = r.state
+					map[r.id] = r.state
 					this.prefetchAvatars(r.state)
 				}
 			}
@@ -117,23 +117,23 @@ export default {
 				this.adding = false
 			}
 		},
-		async changeMap(addr) {
-			const map = this.mapSelections[addr]
+		async changeMap(id) {
+			const map = this.mapSelections[id]
 			if (!map) return
-			this.changingMap[addr] = true
+			this.changingMap[id] = true
 			try {
-				await fetch(`${config.api.baseUrl}/servers/${encodeURIComponent(addr)}/map`, {
+				await fetch(`${config.api.baseUrl}/servers/${id}/map`, {
 					method: 'POST',
 					headers: { ...this.authHeaders(), 'Content-Type': 'application/json' },
 					body: JSON.stringify({ map }),
 				})
 				setTimeout(() => this.fetchServers(), 3000)
 			} finally {
-				this.changingMap[addr] = false
+				this.changingMap[id] = false
 			}
 		},
-		async removeServer(addr) {
-			await fetch(`${config.api.baseUrl}/servers/${encodeURIComponent(addr)}`, {
+		async removeServer(srv) {
+			await fetch(`${config.api.baseUrl}/servers/${srv.id}`, {
 				method: 'DELETE',
 				headers: this.authHeaders(),
 			})
@@ -190,7 +190,7 @@ export default {
 	</div>
 
 	<div v-else class="row g-3">
-		<div v-for="srv in servers" :key="srv.addr" class="col-12 col-md-6 col-xl-4">
+		<div v-for="srv in servers" :key="srv.id || srv.addr" class="col-12 col-md-6 col-xl-4">
 			<div class="card h-100" :class="srv.online ? 'border-0' : 'border border-danger border-opacity-25'">
 				<div class="card-body">
 					<div class="d-flex align-items-center justify-content-between mb-3">
@@ -223,39 +223,39 @@ export default {
 						</div>
 
 						<!-- Match state -->
-					<template v-if="srv.managed && matchStates[srv.addr]">
+					<template v-if="srv.managed && matchStates[srv.id]">
 						<div class="border-top border-light border-opacity-10 pt-3 mt-3">
 
 							<!-- Phase + map (centre) + round -->
 							<div class="d-flex align-items-center justify-content-between mb-2 position-relative">
-								<span class="small fw-semibold" :class="phaseClass(matchStates[srv.addr].phase)">
-									{{ phaseLabel(matchStates[srv.addr].phase) }}
+								<span class="small fw-semibold" :class="phaseClass(matchStates[srv.id].phase)">
+									{{ phaseLabel(matchStates[srv.id].phase) }}
 								</span>
-								<span v-if="matchStates[srv.addr].map" class="small text-inverse text-opacity-50 position-absolute start-50 translate-middle-x">
-									<i class="fa fa-map fa-xs me-1"></i>{{ matchStates[srv.addr].map }}
+								<span v-if="matchStates[srv.id].map" class="small text-inverse text-opacity-50 position-absolute start-50 translate-middle-x">
+									<i class="fa fa-map fa-xs me-1"></i>{{ matchStates[srv.id].map }}
 								</span>
 								<span class="small text-inverse text-opacity-50">
-									<span v-if="matchStates[srv.addr].round > 0">Round {{ matchStates[srv.addr].round }}</span>
+									<span v-if="matchStates[srv.id].round > 0">Round {{ matchStates[srv.id].round }}</span>
 								</span>
 							</div>
 
 							<!-- Score -->
-							<div v-if="matchStates[srv.addr].phase !== 'idle'" class="d-flex align-items-center justify-content-center gap-3 mb-3">
+							<div v-if="matchStates[srv.id].phase !== 'idle'" class="d-flex align-items-center justify-content-center gap-3 mb-3">
 								<div class="text-center">
-									<div class="fw-bold fs-3 lh-1" style="color: var(--bs-cyan)">{{ matchStates[srv.addr].score_ct }}</div>
+									<div class="fw-bold fs-3 lh-1" style="color: var(--bs-cyan)">{{ matchStates[srv.id].score_ct }}</div>
 									<div style="color: var(--bs-cyan); opacity:.6; font-size:.65rem; text-transform:uppercase; letter-spacing:.05em">CT</div>
 								</div>
 								<span class="text-inverse text-opacity-25 fs-5">:</span>
 								<div class="text-center">
-									<div class="fw-bold fs-3 lh-1" style="color: var(--bs-orange)">{{ matchStates[srv.addr].score_t }}</div>
+									<div class="fw-bold fs-3 lh-1" style="color: var(--bs-orange)">{{ matchStates[srv.id].score_t }}</div>
 									<div style="color: var(--bs-orange); opacity:.6; font-size:.65rem; text-transform:uppercase; letter-spacing:.05em">T</div>
 								</div>
 							</div>
 
 							<!-- Players by team -->
-							<template v-if="Object.keys(matchStates[srv.addr].players ?? {}).length">
+							<template v-if="Object.keys(matchStates[srv.id].players ?? {}).length">
 								<template v-for="[teamKey, teamLabel, teamColor] in [['CT','CT','cyan'],['TERRORIST','T','orange']]" :key="teamKey">
-									<template v-if="playersForTeam(matchStates[srv.addr], teamKey).length">
+									<template v-if="playersForTeam(matchStates[srv.id], teamKey).length">
 										<div class="d-flex align-items-center gap-2 mb-1" :style="`color: var(--bs-${teamColor})`">
 											<span style="font-size:.65rem; text-transform:uppercase; letter-spacing:.06em; font-weight:600; opacity:.8">{{ teamLabel }}</span>
 											<div class="flex-grow-1 border-top" :style="`border-color: var(--bs-${teamColor}) !important; opacity:.25`"></div>
@@ -275,7 +275,7 @@ export default {
 										</thead>
 										<tbody>
 											<tr
-												v-for="p in playersForTeam(matchStates[srv.addr], teamKey)"
+												v-for="p in playersForTeam(matchStates[srv.id], teamKey)"
 												:key="p.steamid"
 												class="text-inverse"
 											>
@@ -308,7 +308,7 @@ export default {
 					</template>
 
 					<div v-if="isAdmin && srv.managed" class="d-flex gap-2 mt-3">
-							<select v-model="mapSelections[srv.addr]" class="form-select form-select-sm flex-grow-1">
+							<select v-model="mapSelections[srv.id]" class="form-select form-select-sm flex-grow-1">
 								<option value="" disabled selected>Changer la map…</option>
 								<optgroup label="Active Duty">
 									<option v-for="m in cs2Maps" :key="m" :value="m">{{ m }}</option>
@@ -316,10 +316,10 @@ export default {
 							</select>
 							<button
 								class="btn btn-outline-theme btn-sm"
-								:disabled="!mapSelections[srv.addr] || changingMap[srv.addr]"
-								@click="changeMap(srv.addr)"
+								:disabled="!mapSelections[srv.id] || changingMap[srv.id]"
+								@click="changeMap(srv.id)"
 							>
-								<span v-if="changingMap[srv.addr]" class="spinner-border spinner-border-sm"></span>
+								<span v-if="changingMap[srv.id]" class="spinner-border spinner-border-sm"></span>
 								<i v-else class="fa fa-arrow-right"></i>
 							</button>
 						</div>
@@ -332,7 +332,7 @@ export default {
 								<button v-if="!srv.managed" class="btn btn-outline-warning btn-sm" @click="newAddr = srv.addr" title="Configurer RCON">
 									<i class="fa fa-key"></i>
 								</button>
-								<button v-else class="btn btn-outline-danger btn-sm" @click="removeServer(srv.addr)" title="Retirer">
+								<button v-else class="btn btn-outline-danger btn-sm" @click="removeServer(srv)" title="Retirer">
 									<i class="fa fa-trash"></i>
 								</button>
 							</template>
@@ -342,7 +342,7 @@ export default {
 					<div v-else class="text-inverse text-opacity-50 small">
 						<div class="d-flex justify-content-between align-items-center">
 							{{ srv.addr }}
-							<button v-if="isAdmin" class="btn btn-outline-danger btn-sm" @click="removeServer(srv.addr)" title="Supprimer">
+							<button v-if="isAdmin" class="btn btn-outline-danger btn-sm" @click="removeServer(srv)" title="Supprimer">
 								<i class="fa fa-trash"></i>
 							</button>
 						</div>

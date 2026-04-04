@@ -29,6 +29,9 @@
   { "type": "cs2.bomb.got",          "pattern": "{player:player} triggered \"Got_The_Bomb\"" },
   { "type": "cs2.bomb.drop",         "pattern": "{player:player} triggered \"Dropped_The_Bomb\"" },
 
+  { "type": "cs2.map.loading",         "pattern": "Loading map {map:quoted}" },
+  { "type": "cs2.map.started",         "pattern": "Started:  {path:quoted}" },
+
   { "type": "cs2.warmup.start",       "pattern": "World triggered \"Warmup_Start\"" },
   { "type": "cs2.warmup.end",         "pattern": "World triggered \"Warmup_End\"" },
   { "type": "cs2.match.start",       "pattern": "World triggered \"Match_Start\" on {map:quoted}" },

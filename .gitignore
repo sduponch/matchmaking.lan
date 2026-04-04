@@ -2,3 +2,6 @@ backend/.env
 backend/servers.json
 backend/players.json
 backend/teams.json
+backend/encounters.json
+backend/map_pool.json
+backend/match_profiles.json

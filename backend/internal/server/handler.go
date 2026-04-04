@@ -10,9 +10,11 @@ import (
 	"github.com/rumblefrog/go-a2s"
 	"matchmaking.lan/backend/internal/config"
 	"matchmaking.lan/backend/internal/gamelog"
+	"matchmaking.lan/backend/internal/matchconfig"
 )
 
 type ServerInfo struct {
+	Token      string     `json:"id"`
 	Addr       string     `json:"addr"`
 	Name       string     `json:"name"`
 	Map        string     `json:"map"`
@@ -22,29 +24,34 @@ type ServerInfo struct {
 	PingMs     int        `json:"ping_ms"`
 	Online     bool       `json:"online"`
 	Managed    bool       `json:"managed"`
+	Maps       []string   `json:"maps,omitempty"`
 	LastLogAt  *time.Time `json:"last_log_at,omitempty"`
 }
 
 func HandleList() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		managedMap := getManagedAddrs()
+		all := GetAll()
 
-		// Broadcast discovery + managed servers
+		// Build addr→token map for managed servers
+		addrToToken := make(map[string]string, len(all))
+		for tok, e := range all {
+			addrToToken[e.Addr] = tok
+		}
+
+		// Collect all addresses: discovered + managed
 		discovered := discoverLAN(1 * time.Second)
-
 		seen := map[string]bool{}
 		var allAddrs []string
-
 		for _, addr := range discovered {
 			if !seen[addr] {
 				seen[addr] = true
 				allAddrs = append(allAddrs, addr)
 			}
 		}
-		for addr := range managedMap {
-			if !seen[addr] {
-				seen[addr] = true
-				allAddrs = append(allAddrs, addr)
+		for _, e := range all {
+			if !seen[e.Addr] {
+				seen[e.Addr] = true
+				allAddrs = append(allAddrs, e.Addr)
 			}
 		}
 
@@ -55,18 +62,25 @@ func HandleList() gin.HandlerFunc {
 
 		results := make([]ServerInfo, len(allAddrs))
 		var wg sync.WaitGroup
-
 		for i, addr := range allAddrs {
 			wg.Add(1)
 			go func(i int, addr string) {
 				defer wg.Done()
 				info := query(addr)
-				info.Managed = managedMap[addr] != ""
-				info.LastLogAt = GetLastLogAt(addr)
+				if tok, ok := addrToToken[addr]; ok {
+					info.Token = tok
+					info.Managed = true
+					info.LastLogAt = GetLastLogAt(addr)
+					if e, exists := GetByToken(tok); exists {
+						if e.Name != "" {
+							info.Name = e.Name
+						}
+						info.Maps = e.Maps
+					}
+				}
 				results[i] = info
 			}(i, addr)
 		}
-
 		wg.Wait()
 		c.JSON(http.StatusOK, results)
 	}
@@ -90,21 +104,43 @@ func HandleAdd() gin.HandlerFunc {
 			}
 		}
 
-		if err := upsertManaged(body.Addr, body.RCON); err != nil {
+		token, err := upsertManaged(body.Addr, body.RCON)
+		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 
+		// Fetch available maps in background (best-effort).
+		if body.RCON != "" {
+			go func() {
+				maps := FetchMaps(body.Addr, body.RCON)
+				if len(maps) > 0 {
+					setMaps(token, maps)
+					log.Printf("[rcon] %s fetched %d maps", body.Addr, len(maps))
+				}
+			}()
+		}
+
+		// Push server init config (gotv + base cvars).
+		if cmds := matchconfig.GetServerInitCommands(); len(cmds) > 0 {
+			if err := SendRCONBatch(body.Addr, body.RCON, cmds); err != nil {
+				log.Printf("[rcon] %s server_init push ERROR: %v", body.Addr, err)
+			} else {
+				log.Printf("[rcon] %s server_init pushed (%d commands)", body.Addr, len(cmds))
+			}
+		}
+
 		// Register remote log listener and verify reception.
-		// ExpectLog must be registered before sending the RCON commands so we
-		// don't miss the log line CS2 emits immediately on logaddress_add_http.
 		if config.C.BackendURL != "" && body.RCON != "" {
-			token := getToken(body.Addr)
 			logURL := config.C.BackendURL + "/internal/log/" + token
 			cmd := `logaddress_add_http "` + logURL + `"`
 			done := make(chan bool, 1)
 			go func() { done <- gamelog.ExpectLog(body.Addr, 5*time.Second) }()
 			sendRCON(body.Addr, body.RCON, "log on")
+			// Clear all previous logaddress registrations before adding the new one.
+			// CS2 accumulates logaddress_add_http entries without deduplicating — old
+			// entries from prior server-add operations would cause duplicate event processing.
+			sendRCON(body.Addr, body.RCON, "logaddress_delall_http")
 			if _, err := sendRCON(body.Addr, body.RCON, cmd); err != nil {
 				log.Printf("[gamelog] %s logaddress_add_http ERROR: %v", body.Addr, err)
 			} else if received := <-done; received {
@@ -115,6 +151,7 @@ func HandleAdd() gin.HandlerFunc {
 		}
 
 		info := query(body.Addr)
+		info.Token = token
 		info.Managed = true
 		info.LastLogAt = GetLastLogAt(body.Addr)
 		c.JSON(http.StatusOK, info)
@@ -123,11 +160,75 @@ func HandleAdd() gin.HandlerFunc {
 
 func HandleRemove() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		addr := c.Param("addr")
-		if err := removeManaged(addr); err != nil {
+		token := c.Param("token")
+		if err := removeManaged(token); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		c.Status(http.StatusNoContent)
+	}
+}
+
+func HandleSetName() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		token := c.Param("token")
+		var body struct {
+			Name string `json:"name" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := setName(token, body.Name); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "server not found"})
+			return
+		}
+		// Update hostname on the CS2 server via RCON (best-effort).
+		if e, ok := GetByToken(token); ok && e.RCON != "" {
+			if _, err := sendRCON(e.Addr, e.RCON, `hostname "`+body.Name+`"`); err != nil {
+				log.Printf("[rcon] %s hostname update failed: %v", e.Addr, err)
+			}
+		}
+		c.Status(http.StatusNoContent)
+	}
+}
+
+// HandlePushCFG pushes server_init.cfg or a match profile's warmup CFG to the server via RCON.
+// Body: { "profile_id": "server_init" | "<profile_id>" }
+func HandlePushCFG() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		token := c.Param("token")
+		e, ok := GetByToken(token)
+		if !ok || e.RCON == "" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "server not managed or no RCON password"})
+			return
+		}
+		var body struct {
+			ProfileID string `json:"profile_id" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		var cmds []string
+		if body.ProfileID == "server_init" {
+			cmds = matchconfig.GetServerInitCommands()
+		} else {
+			cmds = matchconfig.GetProfileWarmupCommands(body.ProfileID)
+		}
+
+		if len(cmds) == 0 {
+			c.JSON(http.StatusNotFound, gin.H{"error": "no commands found for this profile"})
+			return
+		}
+
+		if err := SendRCONBatch(e.Addr, e.RCON, cmds); err != nil {
+			log.Printf("[rcon] %s push cfg %q ERROR: %v", e.Addr, body.ProfileID, err)
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		log.Printf("[rcon] %s push cfg %q OK (%d commands)", e.Addr, body.ProfileID, len(cmds))
 		c.Status(http.StatusNoContent)
 	}
 }

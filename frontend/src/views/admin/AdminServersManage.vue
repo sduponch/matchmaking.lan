@@ -13,6 +13,10 @@ export default {
 			changingMap: {},
 			matchPollInterval: null,
 			openServer: null,
+			editingName: null,  // token of server being renamed
+			editNameValue: '',
+			profiles: [],
+			pushingCfg: {},     // serverId → bool
 		}
 	},
 	setup() {
@@ -29,6 +33,7 @@ export default {
 	},
 	mounted() {
 		this.fetchServers()
+		this.fetchProfiles()
 		this.matchPollInterval = setInterval(() => this.fetchMatchStates(), 5000)
 	},
 	unmounted() {
@@ -54,19 +59,18 @@ export default {
 			const managed = (this.servers || []).filter(s => s.managed && s.online)
 			const results = await Promise.all(
 				managed.map(s =>
-					fetch(`${config.api.baseUrl}/servers/${encodeURIComponent(s.addr)}/match`, { headers: this.authHeaders() })
+					fetch(`${config.api.baseUrl}/servers/${s.id}/match`, { headers: this.authHeaders() })
 						.then(r => r.json())
-						.then(state => ({ addr: s.addr, state }))
+						.then(state => ({ id: s.id, addr: s.addr, state }))
 						.catch(() => null)
 				)
 			)
 			const map = {}
 			for (const r of results) {
 				if (r) {
-					map[r.addr] = r.state
+					map[r.id] = r.state
 					this.prefetchAvatars(r.state)
-					// Update last_log_at on the server object from the match poll
-					const srv = this.servers.find(s => s.addr === r.addr)
+					const srv = this.servers.find(s => s.id === r.id)
 					if (srv && r.state.last_log_at) srv.last_log_at = r.state.last_log_at
 				}
 			}
@@ -74,7 +78,7 @@ export default {
 		},
 		prefetchAvatars(state) {
 			for (const p of Object.values(state.players ?? {})) {
-				if (p.steamid && !this.avatarCache[p.steamid]) {
+				if (p.steamid && /^\d{17}$/.test(p.steamid) && !this.avatarCache[p.steamid]) {
 					this.avatarCache[p.steamid] = ''
 					fetch(`${config.api.baseUrl}/profile/${encodeURIComponent(p.steamid)}`, { headers: this.authHeaders() })
 						.then(r => r.json())
@@ -83,14 +87,35 @@ export default {
 				}
 			}
 		},
-		toggle(addr) {
-			this.openServer = this.openServer === addr ? null : addr
+		toggle(id) {
+			this.openServer = this.openServer === id ? null : id
+		},
+		displayName(srv) {
+			return srv.name || srv.addr
+		},
+		startEditName(srv) {
+			this.editingName = srv.id
+			this.editNameValue = srv.name || ''
+		},
+		cancelEditName() {
+			this.editingName = null
+			this.editNameValue = ''
+		},
+		async saveEditName(srv) {
+			const name = this.editNameValue.trim()
+			if (!name) { this.cancelEditName(); return }
+			await fetch(`${config.api.baseUrl}/servers/${srv.id}/name`, {
+				method: 'PUT',
+				headers: { ...this.authHeaders(), 'Content-Type': 'application/json' },
+				body: JSON.stringify({ name }),
+			})
+			srv.name = name
+			this.cancelEditName()
 		},
 		matchSteps(matchState) {
 			const phase = matchState.phase
 			const round = matchState.round
 			const map = matchState.map
-
 			const stepIndex = {
 				idle:      0,
 				warmup:    1,
@@ -100,14 +125,12 @@ export default {
 				overtime:  2,
 				game_over: 3,
 			}[phase] ?? 0
-
 			const steps = [
 				{ key: 'idle',      label: 'En attente', detail: '—' },
 				{ key: 'warmup',    label: 'Warmup',     detail: map || '—' },
 				{ key: 'live',      label: 'En cours',   detail: round > 0 ? `Round ${round} / 24` : (map || '—') },
 				{ key: 'game_over', label: 'Terminé',    detail: map || '—' },
 			]
-
 			return steps.map((s, i) => ({
 				...s,
 				state: i < stepIndex ? 'completed' : i === stepIndex ? 'active' : 'disabled',
@@ -124,19 +147,19 @@ export default {
 				.filter(p => p.team === team)
 				.sort((a, b) => b.kills - a.kills)
 		},
-		async changeMap(addr) {
-			const map = this.mapSelections[addr]
+		async changeMap(id) {
+			const map = this.mapSelections[id]
 			if (!map) return
-			this.changingMap[addr] = true
+			this.changingMap[id] = true
 			try {
-				await fetch(`${config.api.baseUrl}/servers/${encodeURIComponent(addr)}/map`, {
+				await fetch(`${config.api.baseUrl}/servers/${id}/map`, {
 					method: 'POST',
 					headers: { ...this.authHeaders(), 'Content-Type': 'application/json' },
 					body: JSON.stringify({ map }),
 				})
 				setTimeout(() => this.fetchServers(), 3000)
 			} finally {
-				this.changingMap[addr] = false
+				this.changingMap[id] = false
 			}
 		},
 		lastLogLabel(iso) {
@@ -152,13 +175,33 @@ export default {
 			if (diff < 600) return 'text-warning'
 			return 'text-danger'
 		},
-		async removeServer(addr) {
-			await fetch(`${config.api.baseUrl}/servers/${encodeURIComponent(addr)}`, {
+		async removeServer(srv) {
+			await fetch(`${config.api.baseUrl}/servers/${srv.id}`, {
 				method: 'DELETE',
 				headers: this.authHeaders(),
 			})
-			if (this.openServer === addr) this.openServer = null
+			if (this.openServer === srv.id) this.openServer = null
 			await this.fetchServers()
+		},
+		async fetchProfiles() {
+			try {
+				const res = await fetch(`${config.api.baseUrl}/match-profiles`, { headers: this.authHeaders() })
+				this.profiles = await res.json()
+			} catch {
+				this.profiles = []
+			}
+		},
+		async pushCfg(srv, profileId) {
+			this.pushingCfg[srv.id] = true
+			try {
+				await fetch(`${config.api.baseUrl}/servers/${srv.id}/cfg`, {
+					method: 'POST',
+					headers: { ...this.authHeaders(), 'Content-Type': 'application/json' },
+					body: JSON.stringify({ profile_id: profileId }),
+				})
+			} finally {
+				this.pushingCfg[srv.id] = false
+			}
 		},
 	},
 }
@@ -194,7 +237,7 @@ export default {
 					<thead>
 						<tr>
 							<th scope="col" style="width:16px"></th>
-							<th scope="col">Serveur</th>
+							<th scope="col">Nom</th>
 							<th scope="col">Adresse</th>
 							<th scope="col">Statut</th>
 							<th scope="col">Score</th>
@@ -206,37 +249,53 @@ export default {
 						</tr>
 					</thead>
 					<tbody>
-						<template v-for="srv in managedServers" :key="srv.addr">
+						<template v-for="srv in managedServers" :key="srv.id">
 
 							<!-- Ligne principale -->
 							<tr
 								class="align-middle"
-								:class="{ 'table-active': openServer === srv.addr }"
+								:class="{ 'table-active': openServer === srv.id }"
 								style="cursor:pointer"
-								@click="toggle(srv.addr)"
+								@click="toggle(srv.id)"
 							>
 								<td class="ps-3">
 									<i class="fa fa-chevron-right fa-xs text-inverse text-opacity-25 transition-transform"
-										:style="openServer === srv.addr ? 'transform:rotate(90deg)' : ''">
+										:style="openServer === srv.id ? 'transform:rotate(90deg)' : ''">
 									</i>
 								</td>
 								<td>
-									<div class="d-flex align-items-center gap-2">
+									<!-- Inline name editor -->
+									<div v-if="editingName === srv.id" class="d-flex align-items-center gap-1" @click.stop>
+										<input
+											v-model="editNameValue"
+											class="form-control form-control-sm"
+											style="max-width:220px"
+											@keyup.enter="saveEditName(srv)"
+											@keyup.escape="cancelEditName"
+											autofocus
+										/>
+										<button class="btn btn-sm btn-outline-theme px-2" @click="saveEditName(srv)"><i class="fa fa-check"></i></button>
+										<button class="btn btn-sm btn-outline-secondary px-2" @click="cancelEditName"><i class="fa fa-xmark"></i></button>
+									</div>
+									<div v-else class="d-flex align-items-center gap-2">
 										<span class="d-inline-block rounded-circle flex-shrink-0"
 											:class="srv.online ? 'bg-success' : 'bg-danger'"
 											style="width:7px;height:7px">
 										</span>
-										<span class="fw-semibold">{{ srv.online ? srv.name : srv.addr }}</span>
+										<span class="fw-semibold">{{ displayName(srv) }}</span>
+										<button class="btn btn-link btn-sm p-0 text-inverse text-opacity-25" @click.stop="startEditName(srv)" title="Renommer">
+											<i class="fa fa-pen fa-xs"></i>
+										</button>
 									</div>
 								</td>
 								<td class="font-monospace text-inverse text-opacity-50" style="font-size:.82rem">{{ srv.addr }}</td>
 								<td>
-									<template v-if="matchStates[srv.addr] && matchStates[srv.addr].phase !== 'idle'">
-										<span class="small fw-semibold" :class="phaseClass(matchStates[srv.addr].phase)">
-											{{ phaseLabel(matchStates[srv.addr].phase) }}
+									<template v-if="matchStates[srv.id] && matchStates[srv.id].phase !== 'idle'">
+										<span class="small fw-semibold" :class="phaseClass(matchStates[srv.id].phase)">
+											{{ phaseLabel(matchStates[srv.id].phase) }}
 										</span>
-										<span v-if="matchStates[srv.addr].round > 0" class="text-inverse text-opacity-50 small ms-1">
-											— Round {{ matchStates[srv.addr].round }} / 24
+										<span v-if="matchStates[srv.id].round > 0" class="text-inverse text-opacity-50 small ms-1">
+											— Round {{ matchStates[srv.id].round }} / 24
 										</span>
 									</template>
 									<template v-else>
@@ -247,10 +306,10 @@ export default {
 									</template>
 								</td>
 								<td>
-									<template v-if="matchStates[srv.addr] && matchStates[srv.addr].phase !== 'idle'">
-										<span class="fw-bold" style="color:var(--bs-cyan)">{{ matchStates[srv.addr].score_ct }}</span>
+									<template v-if="matchStates[srv.id] && matchStates[srv.id].phase !== 'idle'">
+										<span class="fw-bold" style="color:var(--bs-cyan)">{{ matchStates[srv.id].score_ct }}</span>
 										<span class="text-inverse text-opacity-25 mx-1">:</span>
-										<span class="fw-bold" style="color:var(--bs-orange)">{{ matchStates[srv.addr].score_t }}</span>
+										<span class="fw-bold" style="color:var(--bs-orange)">{{ matchStates[srv.id].score_t }}</span>
 									</template>
 									<span v-else class="text-inverse text-opacity-25">—</span>
 								</td>
@@ -273,14 +332,14 @@ export default {
 									<span v-else class="text-inverse text-opacity-25">—</span>
 								</td>
 								<td class="text-end pe-3" @click.stop>
-									<button class="btn btn-outline-danger btn-sm" @click="removeServer(srv.addr)" title="Retirer">
+									<button class="btn btn-outline-danger btn-sm" @click="removeServer(srv)" title="Retirer">
 										<i class="fa fa-trash"></i>
 									</button>
 								</td>
 							</tr>
 
 							<!-- Ligne détail (accordéon) -->
-							<tr v-if="openServer === srv.addr">
+							<tr v-if="openServer === srv.id">
 								<td colspan="10" class="p-0">
 									<div class="px-4 py-3 border-top border-light border-opacity-10">
 										<div class="row g-4">
@@ -291,17 +350,17 @@ export default {
 													<i class="fa fa-gamepad me-1"></i>Match en cours
 												</p>
 
-												<template v-if="srv.online && matchStates[srv.addr]">
+												<template v-if="srv.online && matchStates[srv.id]">
 
 													<!-- Score -->
-													<div v-if="matchStates[srv.addr].phase !== 'idle'" class="d-flex align-items-center justify-content-center gap-4 mb-4">
+													<div v-if="matchStates[srv.id].phase !== 'idle'" class="d-flex align-items-center justify-content-center gap-4 mb-4">
 														<div class="text-center">
-															<div class="fw-bold fs-1 lh-1" style="color:var(--bs-cyan)">{{ matchStates[srv.addr].score_ct }}</div>
+															<div class="fw-bold fs-1 lh-1" style="color:var(--bs-cyan)">{{ matchStates[srv.id].score_ct }}</div>
 															<div style="color:var(--bs-cyan);opacity:.5;font-size:.65rem;text-transform:uppercase;letter-spacing:.08em">CT</div>
 														</div>
 														<span class="text-inverse text-opacity-15 fs-3">:</span>
 														<div class="text-center">
-															<div class="fw-bold fs-1 lh-1" style="color:var(--bs-orange)">{{ matchStates[srv.addr].score_t }}</div>
+															<div class="fw-bold fs-1 lh-1" style="color:var(--bs-orange)">{{ matchStates[srv.id].score_t }}</div>
 															<div style="color:var(--bs-orange);opacity:.5;font-size:.65rem;text-transform:uppercase;letter-spacing:.08em">T</div>
 														</div>
 													</div>
@@ -309,7 +368,7 @@ export default {
 													<!-- Wizard phases -->
 													<div class="nav-wizards-container mb-4">
 														<nav class="nav nav-wizards-3">
-															<div v-for="step in matchSteps(matchStates[srv.addr])" :key="step.key" class="nav-item col">
+															<div v-for="step in matchSteps(matchStates[srv.id])" :key="step.key" class="nav-item col">
 																<a class="nav-link" :class="step.state">
 																	<div class="nav-dot"></div>
 																	<div class="nav-title">{{ step.label }}</div>
@@ -319,7 +378,7 @@ export default {
 														</nav>
 													</div>
 
-													<template v-if="Object.keys(matchStates[srv.addr].players ?? {}).length">
+													<template v-if="Object.keys(matchStates[srv.id].players ?? {}).length">
 														<div class="table-responsive">
 															<table class="table table-sm table-hover mb-0">
 																<thead>
@@ -336,13 +395,13 @@ export default {
 																</thead>
 																<tbody>
 																	<template v-for="[teamKey, teamLabel, teamColor] in [['CT','CT','cyan'],['TERRORIST','T','orange']]" :key="teamKey">
-																		<template v-if="playersForTeam(matchStates[srv.addr], teamKey).length">
+																		<template v-if="playersForTeam(matchStates[srv.id], teamKey).length">
 																			<tr>
 																				<td colspan="8" class="py-1 px-2" :style="`color:var(--bs-${teamColor});font-size:.62rem;text-transform:uppercase;letter-spacing:.08em;font-weight:700;opacity:.8;background:rgba(var(--bs-${teamColor}-rgb),.05)`">
 																				{{ teamLabel }}
 																				</td>
 																			</tr>
-																			<tr v-for="p in playersForTeam(matchStates[srv.addr], teamKey)" :key="p.steamid">
+																			<tr v-for="p in playersForTeam(matchStates[srv.id], teamKey)" :key="p.steamid">
 																				<td style="max-width:160px">
 																					<div class="d-flex align-items-center gap-2">
 																						<img v-if="avatarCache[p.steamid]" :src="avatarCache[p.steamid]" width="20" height="20" style="border-radius:3px;flex-shrink:0" />
@@ -365,7 +424,7 @@ export default {
 														</div>
 													</template>
 
-													<p v-if="matchStates[srv.addr].phase === 'idle'" class="text-inverse text-opacity-25 small mb-0">
+													<p v-if="matchStates[srv.id].phase === 'idle'" class="text-inverse text-opacity-25 small mb-0">
 														Aucune partie en cours.
 													</p>
 												</template>
@@ -384,7 +443,7 @@ export default {
 													<div v-if="srv.online" class="row align-items-center mb-2">
 														<label class="col-sm-3 col-form-label col-form-label-sm">Changer la map</label>
 														<div class="col-sm-9 d-flex gap-2">
-															<select v-model="mapSelections[srv.addr]" class="form-select form-select-sm" style="max-width:220px">
+															<select v-model="mapSelections[srv.id]" class="form-select form-select-sm" style="max-width:220px">
 																<option value="" disabled selected>Sélectionner…</option>
 																<optgroup label="Active Duty">
 																	<option v-for="m in cs2Maps" :key="m" :value="m">{{ m }}</option>
@@ -392,19 +451,49 @@ export default {
 															</select>
 															<button
 																class="btn btn-outline-theme btn-sm"
-																:disabled="!mapSelections[srv.addr] || changingMap[srv.addr]"
-																@click="changeMap(srv.addr)"
+																:disabled="!mapSelections[srv.id] || changingMap[srv.id]"
+																@click="changeMap(srv.id)"
 															>
-																<span v-if="changingMap[srv.addr]" class="spinner-border spinner-border-sm"></span>
+																<span v-if="changingMap[srv.id]" class="spinner-border spinner-border-sm"></span>
 																<i v-else class="fa fa-arrow-right"></i>
 															</button>
 														</div>
 													</div>
 
-													<div class="row align-items-center">
+													<div v-if="srv.online" class="row align-items-center mb-2">
+														<label class="col-sm-3 col-form-label col-form-label-sm">Configurer</label>
+														<div class="col-sm-9">
+															<div class="dropdown">
+																<button
+																	class="btn btn-outline-secondary btn-sm dropdown-toggle"
+																	:disabled="pushingCfg[srv.id]"
+																	data-bs-toggle="dropdown"
+																>
+																	<span v-if="pushingCfg[srv.id]" class="spinner-border spinner-border-sm me-1"></span>
+																	<i v-else class="fa fa-upload me-1"></i>Pousser une config
+																</button>
+																<ul class="dropdown-menu">
+																	<li>
+																		<a class="dropdown-item" href="#" @click.prevent="pushCfg(srv, 'server_init')">
+																			<i class="fa fa-file-code me-2 text-inverse text-opacity-50"></i>Default (init serveur)
+																		</a>
+																	</li>
+																	<li v-if="profiles.length"><hr class="dropdown-divider" /></li>
+																	<li v-for="p in profiles" :key="p.id">
+																		<a class="dropdown-item" href="#" @click.prevent="pushCfg(srv, p.id)">
+																			<i class="fa fa-sliders me-2 text-inverse text-opacity-50"></i>{{ p.name }}
+																			<span v-if="p.tags?.length" class="text-inverse text-opacity-25 small ms-1">{{ p.tags.join(", ") }}</span>
+																		</a>
+																	</li>
+																</ul>
+															</div>
+														</div>
+													</div>
+
+												<div class="row align-items-center">
 														<label class="col-sm-3 col-form-label col-form-label-sm text-danger">Retirer le serveur</label>
 														<div class="col-sm-9">
-															<button class="btn btn-outline-danger btn-sm" @click="removeServer(srv.addr)">
+															<button class="btn btn-outline-danger btn-sm" @click="removeServer(srv)">
 																<i class="fa fa-trash me-1"></i>Retirer
 															</button>
 														</div>

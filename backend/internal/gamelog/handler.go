@@ -12,7 +12,7 @@ import (
 // HandleSSE streams game events for a server via Server-Sent Events.
 func HandleSSE() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		serverAddr := c.Param("addr")
+		serverAddr := c.GetString("serverAddr")
 
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
