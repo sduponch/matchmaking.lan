@@ -28,9 +28,10 @@ var GetEncounterInfo func(serverAddr string) (sidePick string, readyCount int, m
 // Wired in main.go to optionally send mp_swapteams then push live.cfg.
 var OnKnifeChoice func(serverAddr, winnerSide, chosenSide string)
 
-// OnFirstPlayerJoin is called when the first human player enters the game (cs2.player.enter).
-// team is "CT" or "TERRORIST". Used to correct side assignment via mp_swapteams if needed.
-var OnFirstPlayerJoin func(serverAddr, steamID, team string)
+// OnPlayerJoinTeam is called when a human player manually joins a team during warmup.
+// uid is the server-local player UID (for kickid). team is "CT" or "TERRORIST".
+// Fired for every player switching from Unassigned during PhaseWarmup.
+var OnPlayerJoinTeam func(serverAddr, uid, steamID, playerName, team string)
 
 // ExpectWarmup arms the warmup CFG push for the next cs2.map.started event on serverAddr.
 // Call this just before sending the changelevel RCON for a new encounter.

@@ -171,6 +171,7 @@ mp_maxrounds 24
 mp_warmuptime 9999
 mp_warmup_pausetimer 1
 cash_team_bonus_shorthanded 0
+sv_human_autojoin_team 0
 `
 
 const defaultKnifeCFG = `mp_ct_default_secondary ""

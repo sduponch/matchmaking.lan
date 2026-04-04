@@ -13,13 +13,12 @@ import (
 type Machine struct {
 	mu               sync.RWMutex
 	state            MatchState
-	expectWarmup     bool           // armed by ExpectWarmup() when encounter.Start sends changelevel; consumed by cs2.map.started
-	halftimeNotified bool           // true once OnPhaseChange("halftime") fired this map
-	inKnifeSetup     bool           // true between !ready→knife and knife cs2.match.start
-	knifeOver        bool           // true after cs2.game.over in PhaseKnife — waiting for !ct/!t
-	knifeWinSide     string         // "CT" or "TERRORIST" — winner of the knife round
+	expectWarmup     bool            // armed by ExpectWarmup() when encounter.Start sends changelevel; consumed by cs2.map.started
+	halftimeNotified bool            // true once OnPhaseChange("halftime") fired this map
+	inKnifeSetup     bool            // true between !ready→knife and knife cs2.match.start
+	knifeOver        bool            // true after cs2.game.over in PhaseKnife — waiting for !ct/!t
+	knifeWinSide     string          // "CT" or "TERRORIST" — winner of the knife round
 	readySet         map[string]bool // steamid → true, tracks !ready during warmup
-	firstPlayerDone  bool           // true once OnFirstPlayerJoin has fired for this warmup period
 }
 
 func newMachine() *Machine {
@@ -65,7 +64,6 @@ func (m *Machine) Apply(e *gamelog.Event) {
 		m.knifeOver = false
 		m.knifeWinSide = ""
 		m.readySet = map[string]bool{}
-		m.firstPlayerDone = false
 		log.Printf("[match] %s map loading → %s (state reset)", e.Server, newMap)
 
 	case "cs2.map.started":
@@ -93,7 +91,6 @@ func (m *Machine) Apply(e *gamelog.Event) {
 		m.knifeOver = false
 		m.knifeWinSide = ""
 		m.readySet = map[string]bool{}
-		m.firstPlayerDone = false
 		s.Phase = PhaseWarmup
 		s.Round = 0
 		s.ScoreCT = 0
@@ -245,14 +242,16 @@ func (m *Machine) Apply(e *gamelog.Event) {
 			p.Team = to
 			log.Printf("[match] %s player %s switched to %s", e.Server, e.Fields["player"], to)
 		}
-		// Fire OnFirstPlayerJoin on the first human player's Unassigned→team switch.
+		// Fire OnPlayerJoinTeam for every human player switching to CT/T during warmup.
+		// Covers both Unassigned→team and team→team switches (e.g. after mp_swapteams).
 		// BOTs have steamid "BOT"; humans have a Steam3 ID like "[U:1:...]".
-		if !m.firstPlayerDone && e.Fields["from"] == "Unassigned" &&
+		if s.Phase == PhaseWarmup &&
 			strings.HasPrefix(e.Fields["player_steamid"], "[U:") &&
-			(to == "CT" || to == "TERRORIST") && OnFirstPlayerJoin != nil {
-			m.firstPlayerDone = true
+			(to == "CT" || to == "TERRORIST") && OnPlayerJoinTeam != nil {
+			uid := e.Fields["player_uid"]
 			steamid := steam3ToSteam64(e.Fields["player_steamid"])
-			go OnFirstPlayerJoin(e.Server, steamid, to)
+			name := e.Fields["player"]
+			go OnPlayerJoinTeam(e.Server, uid, steamid, name, to)
 		}
 
 	case "cs2.player.disconnect":

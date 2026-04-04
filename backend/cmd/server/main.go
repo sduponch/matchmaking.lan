@@ -133,7 +133,7 @@ func main() {
 		return h
 	}
 
-	match.OnFirstPlayerJoin = func(addr, steamID, team string) {
+	match.OnPlayerJoinTeam = func(addr, uid, steamID, playerName, team string) {
 		token, ok := server.GetTokenByAddr(addr)
 		if !ok {
 			return
@@ -142,24 +142,74 @@ func main() {
 		if !ok {
 			return
 		}
+		// Only enforce sides when a fixed side is configured.
 		if enc.SidePick != "ct" && enc.SidePick != "t" {
 			return
+		}
+		// Determine the correct side for this Steam ID.
+		// enc.SidePick=="ct" → team1 is CT, team2 is T.
+		t1, ok1 := teams.Get(enc.Team1)
+		t2, ok2 := teams.Get(enc.Team2)
+		var correctSide string
+		if ok1 {
+			for _, id := range t1.Players {
+				if id == steamID {
+					if enc.SidePick == "ct" {
+						correctSide = "CT"
+					} else {
+						correctSide = "TERRORIST"
+					}
+					break
+				}
+			}
+		}
+		if correctSide == "" && ok2 {
+			for _, id := range t2.Players {
+				if id == steamID {
+					if enc.SidePick == "ct" {
+						correctSide = "TERRORIST"
+					} else {
+						correctSide = "CT"
+					}
+					break
+				}
+			}
+		}
+		if correctSide == "" || team == correctSide {
+			return // player not assigned to either team, or already on the right side
 		}
 		srvAddr, rcon, ok := server.GetAddrRCON(token)
 		if !ok {
 			return
 		}
+		// Count players currently in a team (CT or T).
+		// If this player is alone, swap all teams instead of kicking.
+		state := match.Get(addr).State()
+		playersInTeam := 0
+		for _, p := range state.Players {
+			if p.Team == "CT" || p.Team == "TERRORIST" {
+				playersInTeam++
+			}
+		}
 		expectedCT := enc.SidePick == "ct"
-		actualCT := team == "CT"
-		if expectedCT != actualCT {
-			log.Printf("[match] %s first player on wrong side (%s), swapping", addr, team)
+		if playersInTeam <= 1 {
+			log.Printf("[match] %s wrong team: %s joined %s, alone → swapping", addr, playerName, team)
 			_ = server.SendRCONBatch(srvAddr, rcon, []string{"mp_swapteams"})
-			// mp_swapteams triggers Restart_Round_(1_second) — push teamnames after the restart.
 			nameCmds := teamNameCmdsWithSide(enc, expectedCT)
 			go func() {
 				time.Sleep(2 * time.Second)
 				_ = server.SendRCONBatch(srvAddr, rcon, nameCmds)
 			}()
+		} else {
+			sideLabel := "CT"
+			if correctSide == "TERRORIST" {
+				sideLabel = "T"
+			}
+			log.Printf("[match] %s wrong team: %s joined %s, expected %s → kicking", addr, playerName, team, correctSide)
+			_ = server.SendRCONBatch(srvAddr, rcon, []string{
+				`say "[ Equipe ] ` + playerName + `: rejoins les ` + sideLabel + ` !"`,
+				"kickid " + uid,
+			})
 		}
 	}
 

@@ -25,7 +25,7 @@ var tokenTypes = map[string]string{
 	// CS2 world position: [-775 -2372 164] — captured but not named
 	"pos": `\[-?\d+ -?\d+ -?\d+\]`,
 	// Player without team field: "Name<uid><steamid>"
-	"player_nt": `"(?P<{N}>[^<"]+)<\d+><(?P<{N}_steamid>[^>]*)>"`,
+	"player_nt": `"(?P<{N}>[^<"]+)<(?P<{N}_uid>\d+)><(?P<{N}_steamid>[^>]*)>"`,
 }
 
 // PatternDef associates a dot-notation event type with a DSL pattern.
